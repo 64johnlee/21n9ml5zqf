@@ -1,0 +1,1541 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src https: wss: http: ws:; media-src blob: mediastream:">
+<title>HomeDesk Viewer</title>
+<style>
+  :root { --bg:#0b0f17; --card:#131a26; --line:#243044; --text:#e6edf7; --dim:#8a99b0; --accent:#3b82f6; --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444; }
+  * { box-sizing: border-box; }
+  html, body { height:100%; margin:0; }
+  body { background:var(--bg); color:var(--text); font:14px/1.5 "Segoe UI","Microsoft YaHei",sans-serif; overflow:hidden; }
+  .hidden { display:none !important; }
+  button, select, input, textarea { font:inherit; color:var(--text); }
+  button { background:#1f2a3c; border:1px solid var(--line); border-radius:7px; padding:5px 11px; cursor:pointer; white-space:nowrap; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); border-color:var(--accent); font-weight:600; }
+  button:disabled { opacity:.6; cursor:default; }
+  select, input[type=text], input[type=password], textarea { background:#0b111b; border:1px solid var(--line); border-radius:7px; padding:6px 8px; }
+
+  #connect { height:100%; display:flex; align-items:center; justify-content:center; padding:16px; }
+  #connect .card { width:100%; max-width:380px; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:22px; }
+  #connect h1 { font-size:20px; margin:0 0 4px; }
+  #connect p { margin:0 0 16px; color:var(--dim); font-size:13px; }
+  #connect label { display:block; font-size:12px; color:var(--dim); margin:10px 0 4px; }
+  #connect input[type=text], #connect input[type=password], #connect textarea { width:100%; }
+  #connect textarea { height:70px; resize:vertical; font:12px Consolas,monospace; }
+  #connectBtn { width:100%; margin-top:16px; padding:9px; }
+  #status { min-height:20px; margin-top:10px; font-size:13px; color:var(--warn); }
+  details { margin-top:12px; color:var(--dim); font-size:12px; }
+  summary { cursor:pointer; }
+
+  #session { height:100%; display:flex; flex-direction:column; background:#000; }
+  #bar { display:flex; gap:8px; align-items:center; padding:5px 8px; background:var(--card); border-bottom:1px solid var(--line); flex-wrap:wrap; z-index:5; }
+  #bar .name { font-weight:600; margin-right:4px; }
+  #bar select { padding:4px 6px; max-width:210px; }
+  #stats { margin-left:auto; color:var(--dim); font:12px Consolas,monospace; }
+  #session:fullscreen #bar { position:absolute; top:0; left:0; right:0; transform:translateY(calc(-100% + 5px)); transition:transform .15s; opacity:.96; }
+  #session:fullscreen #bar:hover { transform:none; }
+  #stage { flex:1; min-height:0; position:relative; outline:none; cursor:default; }
+  #screen { width:100%; height:100%; object-fit:contain; display:block; background:#000; }
+  #stage.drop::after { content:"松开即可发送到家里电脑的「下载/HomeDesk」文件夹"; position:absolute; inset:12px; border:2px dashed var(--accent); border-radius:12px; display:flex; align-items:center; justify-content:center; background:rgba(11,15,23,.75); font-size:18px; }
+  #toasts { position:absolute; right:12px; bottom:12px; display:flex; flex-direction:column; gap:8px; align-items:flex-end; z-index:6; pointer-events:none; }
+  .toast { pointer-events:auto; background:var(--card); border:1px solid var(--line); border-radius:9px; padding:8px 12px; max-width:380px; display:flex; gap:10px; align-items:center; box-shadow:0 6px 24px rgba(0,0,0,.5); }
+  .toast span { overflow-wrap:anywhere; }
+
+  /* phones and tablets */
+  .touch-only { display:none; }
+  body.touch .touch-only { display:inline-block; }
+  body.touch #stage { overflow:hidden; touch-action:none; -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
+  body.touch #screen { transform-origin:0 0; }
+  body.touch #bar { gap:6px; padding:4px 6px; flex-wrap:nowrap; overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  body.touch #bar > * { flex:none; }
+  body.touch #stats { display:none; }
+  body.touch #session { height:100dvh; }
+  body.touch input[type=text], body.touch input[type=password], body.touch textarea { font-size:16px; }
+  #kb { background:var(--card); border-bottom:1px solid var(--line); padding:6px; display:flex; flex-direction:column; gap:6px; }
+  #kb .row { display:flex; gap:6px; }
+  #kb .keys { overflow-x:auto; }
+  #kb textarea { flex:1; min-width:0; resize:none; font-size:16px; }
+  #kb button { padding:6px 10px; }
+</style>
+</head>
+<body>
+  <div id="connect">
+    <div class="card">
+      <h1>HomeDesk Viewer</h1>
+      <p>连接到家里的电脑：看画面、听声音、操作、复制粘贴。</p>
+      <label for="hostId">Host ID</label>
+      <input id="hostId" type="text" autocomplete="off" spellcheck="false" placeholder="家里电脑上显示的 ID">
+      <label for="password">密码</label>
+      <input id="password" type="password" autocomplete="off">
+      <button id="connectBtn" class="primary">连接</button>
+      <div id="status"></div>
+      <details>
+        <summary>高级设置（一般不用改）</summary>
+        <label for="signalUrl">信令服务器</label>
+        <input id="signalUrl" type="text" spellcheck="false">
+        <label for="iceServers">ICE 服务器（JSON，可加 TURN）</label>
+        <textarea id="iceServers" spellcheck="false"></textarea>
+      </details>
+    </div>
+  </div>
+
+  <div id="session" class="hidden">
+    <div id="bar">
+      <span id="hostName" class="name"></span>
+      <select id="displaySel" title="显示器"></select>
+      <select id="qualitySel" title="画质">
+        <option value="2000000">流畅 2M</option>
+        <option value="6000000" selected>标准 6M</option>
+        <option value="12000000">高清 12M</option>
+        <option value="25000000">极清 25M</option>
+      </select>
+      <select id="hintSel" title="优化方向">
+        <option value="detail" selected>文字清晰优先</option>
+        <option value="motion">视频流畅优先</option>
+      </select>
+      <select id="keySel" title="发送组合键">
+        <option value="">发送按键…</option>
+        <option value="MetaLeft">Win</option>
+        <option value="MetaLeft+KeyD">Win + D（显示桌面）</option>
+        <option value="AltLeft+Tab">Alt + Tab</option>
+        <option value="AltLeft+F4">Alt + F4</option>
+        <option value="ControlLeft+ShiftLeft+Escape">Ctrl + Shift + Esc</option>
+        <option value="MetaLeft+ShiftLeft+KeyS">Win + Shift + S（截图）</option>
+        <option value="MetaLeft+PrintScreen">Win + PrintScreen（截全屏并保存）</option>
+        <option value="PrintScreen">PrintScreen</option>
+      </select>
+      <button id="kbBtn" class="touch-only">键盘</button>
+      <button id="muteBtn">静音</button>
+      <button id="fileBtn">发送文件</button>
+      <button id="fullBtn">全屏</button>
+      <button id="closeBtn">断开</button>
+      <span id="stats"></span>
+      <input id="filePick" type="file" multiple class="hidden">
+    </div>
+    <div id="kb" class="hidden">
+      <div class="row">
+        <textarea id="kbText" rows="2" placeholder="在这里打字（中文也行），点「发送」就打到家里电脑光标处"></textarea>
+        <button id="kbSend" class="primary">发送</button>
+      </div>
+      <div class="row keys">
+        <button data-combo="Enter">回车</button>
+        <button data-combo="Backspace">⌫</button>
+        <button data-combo="Delete">Del</button>
+        <button data-combo="Escape">Esc</button>
+        <button data-combo="Tab">Tab</button>
+        <button data-combo="ArrowLeft">←</button>
+        <button data-combo="ArrowUp">↑</button>
+        <button data-combo="ArrowDown">↓</button>
+        <button data-combo="ArrowRight">→</button>
+        <button data-combo="ControlLeft+KeyA">全选</button>
+        <button data-combo="ControlLeft+KeyC">复制</button>
+        <button data-combo="ControlLeft+KeyV">粘贴</button>
+        <button data-combo="ControlLeft+KeyZ">撤销</button>
+      </div>
+    </div>
+    <div id="stage" tabindex="0">
+      <video id="screen" autoplay playsinline></video>
+      <div id="toasts"></div>
+    </div>
+  </div>
+
+<script>
+// Shared by the host window and the viewer page: signaling, bulk transfer
+// protocol, SDP helpers and the viewer-side auth crypto.
+(function () {
+  'use strict';
+
+  // Any ntfy server (https://ntfy.sh is public and free). It relays only the
+  // first WebRTC offer and answer, encrypted. Screen, sound, input and
+  // clipboard never pass through it.
+  const DEFAULT_SIGNAL_URL = 'https://ntfy.sh';
+  const DEFAULT_ICE = [
+    { urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] },
+  ];
+  const CHUNK = 32 * 1024;
+  const HIGH_WATER = 1024 * 1024;
+  const LOW_WATER = 256 * 1024;
+  // ntfy turns messages over 4096 bytes into attachments, so longer ones are split.
+  const PART_SIZE = 3000;
+  const MAX_PARTS = 16;
+  const GATHER_TIMEOUT = 3000;
+  // ntfy sends a keepalive every 45 s; silence for this long means a dead socket.
+  const WATCHDOG = 100000;
+
+  function randomId(length) {
+    const alphabet = 'abcdefghijkmnpqrstuvwxyz23456789';
+    const bytes = crypto.getRandomValues(new Uint8Array(length));
+    let out = '';
+    for (const b of bytes) out += alphabet[b % alphabet.length];
+    return out;
+  }
+
+  function toHex(bytes) {
+    return Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  function fromHex(hex) {
+    const out = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+    return out;
+  }
+
+  function toBase64Url(bytes) {
+    let binary = '';
+    for (const b of bytes) binary += String.fromCharCode(b);
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+
+  function fromBase64Url(text) {
+    const binary = atob(text.replace(/-/g, '+').replace(/_/g, '/'));
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < out.length; i++) out[i] = binary.charCodeAt(i);
+    return out;
+  }
+
+  async function digest(text) {
+    return new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)));
+  }
+
+  async function pipe(bytes, transform) {
+    return new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(transform)).arrayBuffer());
+  }
+
+  // ---- signaling ----
+  //
+  // The viewer publishes one sealed offer on the host's topic and the host
+  // publishes one sealed answer on a per-attempt topic. Both SDPs carry their
+  // ICE candidates, so nothing else is exchanged through the server. The Host
+  // ID is the secret that names the topics and keys the encryption.
+
+  async function signalKeys(hostId) {
+    const key = await crypto.subtle.importKey(
+      'raw', await digest('homedesk-signal|' + hostId), 'AES-GCM', false, ['encrypt', 'decrypt']);
+    return { key, offerTopic: 'hd' + toHex(await digest('homedesk-offer|' + hostId)).slice(0, 40) };
+  }
+
+  async function answerTopic(hostId, sid) {
+    return 'hd' + toHex(await digest('homedesk-answer|' + hostId + '|' + sid)).slice(0, 40);
+  }
+
+  async function seal(key, message) {
+    const plain = await pipe(new TextEncoder().encode(JSON.stringify(message)), new CompressionStream('deflate-raw'));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const sealed = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plain));
+    const all = new Uint8Array(iv.length + sealed.length);
+    all.set(iv);
+    all.set(sealed, iv.length);
+    return toBase64Url(all);
+  }
+
+  // Returns null for anything that was not sealed with this key.
+  async function unseal(key, text) {
+    try {
+      const all = fromBase64Url(text);
+      const plain = new Uint8Array(await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: all.subarray(0, 12) }, key, all.subarray(12)));
+      return JSON.parse(new TextDecoder().decode(await pipe(plain, new DecompressionStream('deflate-raw'))));
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function trimBase(base) {
+    return String(base || DEFAULT_SIGNAL_URL).replace(/\/+$/, '');
+  }
+
+  async function publish(base, topic, text) {
+    const id = randomId(8);
+    const count = Math.max(1, Math.ceil(text.length / PART_SIZE));
+    if (count > MAX_PARTS) throw new Error('signal message too large');
+    for (let i = 0; i < count; i++) {
+      const body = `HD1 ${id} ${i} ${count} ${text.substr(i * PART_SIZE, PART_SIZE)}`;
+      const res = await fetch(`${trimBase(base)}/${topic}`, { method: 'POST', body });
+      if (!res.ok) throw new Error('signal server refused: ' + res.status);
+    }
+  }
+
+  class Subscription {
+    constructor({ base, topic, reconnect, onText, onState }) {
+      this.url = trimBase(base).replace(/^http/i, 'ws') + '/' + topic + '/ws';
+      this.reconnect = !!reconnect;
+      this.onText = onText || (() => {});
+      this.onState = onState || (() => {});
+      this.ws = null;
+      this.closed = false;
+      this.retry = 0;
+      this.retryTimer = null;
+      this.watchdog = null;
+      this.parts = new Map();
+    }
+
+    connect() {
+      if (this.closed) return;
+      this.onState('connecting');
+      let ws;
+      try {
+        ws = new WebSocket(this.url);
+      } catch (e) {
+        this._lost();
+        return;
+      }
+      this.ws = ws;
+      ws.onopen = () => {
+        if (ws !== this.ws) return;
+        this.retry = 0;
+        this._alive();
+        this.onState('open');
+      };
+      ws.onmessage = (ev) => {
+        if (ws !== this.ws) return;
+        this._alive();
+        let m;
+        try { m = JSON.parse(ev.data); } catch (e) { return; }
+        if (m && m.event === 'message' && typeof m.message === 'string') this._part(m.message);
+      };
+      ws.onclose = () => { if (ws === this.ws) this._lost(); };
+      ws.onerror = () => {};
+    }
+
+    _alive() {
+      clearTimeout(this.watchdog);
+      this.watchdog = setTimeout(() => {
+        const ws = this.ws;
+        if (!ws) return;
+        this._lost();
+        try { ws.close(); } catch (e) { /* already closed */ }
+      }, WATCHDOG);
+    }
+
+    _part(text) {
+      const m = /^HD1 ([a-z0-9]{8}) (\d{1,2}) (\d{1,2}) ([A-Za-z0-9_-]*)$/.exec(text);
+      if (!m) return;
+      const index = Number(m[2]);
+      const count = Number(m[3]);
+      if (count < 1 || count > MAX_PARTS || index >= count) return;
+      let entry = this.parts.get(m[1]);
+      if (!entry) {
+        if (this.parts.size >= 32) this.parts.clear();
+        entry = { got: new Array(count).fill(null), left: count };
+        this.parts.set(m[1], entry);
+      }
+      if (entry.got.length !== count || entry.got[index] !== null) return;
+      entry.got[index] = m[4];
+      if (--entry.left === 0) {
+        this.parts.delete(m[1]);
+        this.onText(entry.got.join(''));
+      }
+    }
+
+    _lost() {
+      this.ws = null;
+      clearTimeout(this.watchdog);
+      if (this.closed) return;
+      this.onState('closed');
+      if (this.reconnect) {
+        const delay = Math.min(30000, 1000 * Math.pow(2, this.retry++));
+        clearTimeout(this.retryTimer);
+        this.retryTimer = setTimeout(() => this.connect(), delay);
+      }
+    }
+
+    close() {
+      this.closed = true;
+      clearTimeout(this.retryTimer);
+      clearTimeout(this.watchdog);
+      const ws = this.ws;
+      this.ws = null;
+      if (ws) { try { ws.close(); } catch (e) { /* already closed */ } }
+    }
+  }
+
+  // Resolves once the local description holds its ICE candidates.
+  function gathered(pc) {
+    return new Promise((resolve) => {
+      if (pc.iceGatheringState === 'complete') { resolve(); return; }
+      const done = () => {
+        clearTimeout(timer);
+        pc.removeEventListener('icegatheringstatechange', check);
+        resolve();
+      };
+      const check = () => { if (pc.iceGatheringState === 'complete') done(); };
+      const timer = setTimeout(done, GATHER_TIMEOUT);
+      pc.addEventListener('icegatheringstatechange', check);
+    });
+  }
+
+  // ---- bulk transfers (clipboard content and files) ----
+  //
+  // One transfer at a time per direction on an ordered channel:
+  //   {"t":"start", id, kind, name, size}  binary chunks...  {"t":"end", id}
+  // `onStart(meta)` returns a sink {write, end, abort} or null to discard.
+
+  class Bulk {
+    constructor(channel, onStart) {
+      this.ch = channel;
+      this.onStart = onStart;
+      this.tx = Promise.resolve();
+      this.rx = Promise.resolve();
+      this.cur = null;
+      this.nextId = 1;
+      channel.binaryType = 'arraybuffer';
+      channel.bufferedAmountLowThreshold = LOW_WATER;
+      channel.addEventListener('message', (ev) => {
+        this.rx = this.rx.then(() => this._recv(ev.data)).catch(() => {});
+      });
+    }
+
+    // source: { size, read(offset, length) -> Promise<ArrayBuffer | Uint8Array> }
+    send(meta, source, onProgress) {
+      const job = this.tx.then(() => this._send(meta, source, onProgress));
+      this.tx = job.catch(() => {});
+      return job;
+    }
+
+    async _send(meta, source, onProgress) {
+      const ch = this.ch;
+      if (ch.readyState !== 'open') throw new Error('channel closed');
+      const id = this.nextId++;
+      ch.send(JSON.stringify({ t: 'start', id, kind: meta.kind, name: meta.name || '', size: source.size }));
+      try {
+        let offset = 0;
+        while (offset < source.size) {
+          const chunk = await source.read(offset, Math.min(CHUNK, source.size - offset));
+          if (!chunk || !chunk.byteLength) throw new Error('short read');
+          if (ch.readyState !== 'open') throw new Error('channel closed');
+          if (ch.bufferedAmount > HIGH_WATER) await this._drain();
+          ch.send(chunk);
+          offset += chunk.byteLength;
+          if (onProgress) onProgress(offset, source.size);
+        }
+        ch.send(JSON.stringify({ t: 'end', id }));
+      } catch (e) {
+        if (ch.readyState === 'open') ch.send(JSON.stringify({ t: 'abort', id }));
+        throw e;
+      }
+    }
+
+    _drain() {
+      const ch = this.ch;
+      return new Promise((resolve, reject) => {
+        const cleanup = () => {
+          ch.removeEventListener('bufferedamountlow', low);
+          ch.removeEventListener('close', closed);
+        };
+        const low = () => { cleanup(); resolve(); };
+        const closed = () => { cleanup(); reject(new Error('channel closed')); };
+        ch.addEventListener('bufferedamountlow', low);
+        ch.addEventListener('close', closed);
+      });
+    }
+
+    async _recv(data) {
+      if (typeof data === 'string') {
+        let m;
+        try { m = JSON.parse(data); } catch (e) { return; }
+        if (!m) return;
+        if (m.t === 'start') {
+          if (this.cur) await this._finish(false);
+          if (!Number.isFinite(m.size) || m.size < 0) return;
+          const meta = { kind: String(m.kind), name: String(m.name || ''), size: m.size };
+          let sink = null;
+          try { sink = await this.onStart(meta); } catch (e) { sink = null; }
+          this.cur = { id: m.id, meta, sink, got: 0 };
+        } else if (m.t === 'end' && this.cur && this.cur.id === m.id) {
+          await this._finish(this.cur.got === this.cur.meta.size);
+        } else if (m.t === 'abort' && this.cur && this.cur.id === m.id) {
+          await this._finish(false);
+        }
+        return;
+      }
+      const cur = this.cur;
+      if (!cur || !cur.sink) return;
+      const chunk = new Uint8Array(data);
+      cur.got += chunk.byteLength;
+      try {
+        if (cur.got > cur.meta.size) throw new Error('more data than announced');
+        await cur.sink.write(chunk);
+      } catch (e) {
+        const sink = cur.sink;
+        cur.sink = null;
+        try { await sink.abort(); } catch (e2) { /* nothing left to clean */ }
+      }
+    }
+
+    async _finish(ok) {
+      const cur = this.cur;
+      this.cur = null;
+      if (!cur || !cur.sink) return;
+      try {
+        if (ok) await cur.sink.end();
+        else await cur.sink.abort();
+      } catch (e) { /* sink reported its own failure */ }
+    }
+  }
+
+  function memSource(bytes) {
+    return {
+      size: bytes.byteLength,
+      read: async (offset, length) => bytes.subarray(offset, offset + length),
+    };
+  }
+
+  function memSink(onDone) {
+    const parts = [];
+    return {
+      write: async (chunk) => { parts.push(chunk); },
+      end: async () => {
+        let total = 0;
+        for (const p of parts) total += p.byteLength;
+        const all = new Uint8Array(total);
+        let offset = 0;
+        for (const p of parts) { all.set(p, offset); offset += p.byteLength; }
+        await onDone(all);
+      },
+      abort: async () => { parts.length = 0; },
+    };
+  }
+
+  // ---- SDP helpers ----
+
+  // Ask Opus for stereo at a music-grade bitrate; the default is mono voice.
+  function tuneOpus(sdp) {
+    const m = /a=rtpmap:(\d+) opus\/48000\/2/i.exec(sdp);
+    if (!m) return sdp;
+    const pt = m[1];
+    return sdp.replace(new RegExp('a=fmtp:' + pt + ' ([^\\r\\n]*)'), (line, params) => {
+      const keep = params.split(';').map((s) => s.trim())
+        .filter((p) => p && !/^(stereo|sprop-stereo|maxaveragebitrate)=/.test(p));
+      keep.push('stereo=1', 'sprop-stereo=1', 'maxaveragebitrate=160000');
+      return 'a=fmtp:' + pt + ' ' + keep.join(';');
+    });
+  }
+
+  function fingerprint(sdp) {
+    const m = /a=fingerprint:sha-256 ([0-9a-f:]+)/i.exec(sdp || '');
+    return m ? m[1].toUpperCase() : '';
+  }
+
+  // ---- auth ----
+  //
+  // Both sides prove knowledge of the password-derived key over the two DTLS
+  // certificate fingerprints, so whoever relays the signaling cannot sit in
+  // the middle of the connection.
+
+  function proofInput(role, nonceH, nonceV, fpViewer, fpHost) {
+    return ['HD1', role, nonceH, nonceV, fpViewer, fpHost].join('|');
+  }
+
+  async function deriveKey(password, saltHex, iterations) {
+    const material = await crypto.subtle.importKey(
+      'raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt: fromHex(saltHex), iterations, hash: 'SHA-256' },
+      material, { name: 'HMAC', hash: 'SHA-256', length: 256 }, false, ['sign']);
+  }
+
+  async function hmacHex(key, text) {
+    return toHex(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(text)));
+  }
+
+  window.HD = {
+    DEFAULT_SIGNAL_URL, DEFAULT_ICE,
+    randomId, toHex, fromHex,
+    signalKeys, answerTopic, seal, unseal, publish, Subscription, gathered,
+    Bulk, memSource, memSink,
+    tuneOpus, fingerprint, proofInput, deriveKey, hmacHex,
+  };
+})();
+
+</script>
+<script>
+// Viewer page. Runs unchanged in the HomeDesk viewer window and in a normal
+// Chrome / Edge tab (see build-viewer.js), so it only uses web APIs.
+(function () {
+  'use strict';
+
+  const HD = window.HD;
+  const $ = (id) => document.getElementById(id);
+  const video = $('screen');
+  const stage = $('stage');
+
+  const CONNECT_TIMEOUT = 40000;
+  const ANSWER_TIMEOUT = 15000;
+  const ACK_TIMEOUT = 1500;
+  const CLIP_READ_TIMEOUT = 800;
+  const MAX_CLIP_TEXT = 20 * 1024 * 1024;
+  const MAX_CLIP_IMAGE = 40 * 1024 * 1024;
+  const MAX_DOWNLOAD = 2 * 1024 * 1024 * 1024;
+  const ITERATION_RANGE = [100000, 2000000];
+
+  let attempt = 0;
+  let signal = null;
+  let pc = null;
+  let ctl = null;
+  let bulk = null;
+  // Set when this viewer window was opened by a HomeDesk host on the same PC.
+  const selfHostId = new URLSearchParams(location.search).get('self') || '';
+  let targetHostId = '';
+  let sid = '';
+  let authed = false;
+  let inSession = false;
+  let expectedHostProof = '';
+  let remoteSet = false;
+  let connectTimer = null;
+  let answerTimer = null;
+  let statsTimer = null;
+  let clipTimer = null;
+  let lastStats = null;
+
+  // Phones and tablets: touch gestures instead of a mouse, and a typing panel.
+  const isTouch = !!(window.matchMedia && matchMedia('(pointer: coarse)').matches);
+
+  // clipboard state
+  // iOS only lets a page read the clipboard inside a tap, so background syncing is off there.
+  let clipReadable = !isTouch && !!(navigator.clipboard && navigator.clipboard.readText);
+  let lastText = null;
+  let lastImage = '';
+  let pendingWrite = null;
+  let syncChain = Promise.resolve();
+  let gate = null;
+  let ackWaiters = [];
+
+  // input state
+  const downButtons = new Set();
+  let pendingMove = null;
+  let moveScheduled = false;
+  let wheelX = 0;
+  let wheelY = 0;
+
+  // ---------- small helpers ----------
+
+  function setStatus(text) { $('status').textContent = text || ''; }
+
+  function store(key, value) {
+    try {
+      if (value === undefined) return localStorage.getItem('homedesk.' + key);
+      localStorage.setItem('homedesk.' + key, value);
+    } catch (e) { /* storage unavailable, settings just do not persist */ }
+    return null;
+  }
+
+  function toast(text, opts) {
+    opts = opts || {};
+    const el = document.createElement('div');
+    el.className = 'toast';
+    const span = document.createElement('span');
+    span.textContent = text;
+    el.appendChild(span);
+    if (opts.action) {
+      const button = document.createElement('button');
+      button.textContent = opts.label;
+      button.onclick = () => { el.remove(); opts.action(); stage.focus(); };
+      el.appendChild(button);
+    }
+    $('toasts').appendChild(el);
+    let timer = null;
+    const api = {
+      set: (t) => { span.textContent = t; },
+      close: (ms) => { clearTimeout(timer); timer = setTimeout(() => el.remove(), ms || 0); },
+    };
+    if (!opts.sticky) api.close(opts.ms || 5000);
+    return api;
+  }
+
+  function formatSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+    return (bytes / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+  }
+
+  function withTimeout(promise, ms) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('timeout')), ms);
+      promise.then((v) => { clearTimeout(timer); resolve(v); }, (e) => { clearTimeout(timer); reject(e); });
+    });
+  }
+
+  function ctlSend(message) {
+    if (ctl && ctl.readyState === 'open') ctl.send(JSON.stringify(message));
+  }
+
+  // ---------- connect ----------
+
+  function parseIce() {
+    const text = $('iceServers').value.trim();
+    if (!text) return HD.DEFAULT_ICE;
+    const parsed = JSON.parse(text);
+    if (!Array.isArray(parsed)) throw new Error('not an array');
+    return parsed;
+  }
+
+  function teardown() {
+    attempt++;
+    clearTimeout(connectTimer);
+    clearTimeout(answerTimer);
+    clearInterval(statsTimer);
+    clearInterval(clipTimer);
+    if (signal) signal.close();
+    if (pc) { try { pc.close(); } catch (e) { /* already closed */ } }
+    signal = null; pc = null; ctl = null; bulk = null;
+    authed = false; inSession = false; expectedHostProof = '';
+    remoteSet = false;
+    gate = null; pendingWrite = null; lastStats = null;
+    for (const resolve of ackWaiters) resolve();
+    ackWaiters = [];
+    downButtons.clear();
+    resetTouch();
+    video.srcObject = null;
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    $('session').classList.add('hidden');
+    $('connect').classList.remove('hidden');
+    $('connectBtn').disabled = false;
+    $('toasts').textContent = '';
+  }
+
+  function fail(message) {
+    teardown();
+    setStatus(message);
+  }
+
+  function connect() {
+    const hostId = $('hostId').value.replace(/\s+/g, '').toLowerCase();
+    const password = $('password').value;
+    if (!hostId || !password) { setStatus('请输入 Host ID 和密码。'); return; }
+    let iceServers;
+    try { iceServers = parseIce(); } catch (e) { setStatus('ICE 服务器设置不是合法的 JSON 数组。'); return; }
+    const signalUrl = $('signalUrl').value.trim() || HD.DEFAULT_SIGNAL_URL;
+    store('hostId', hostId);
+    // Only a custom server is remembered, so the built-in default can change later.
+    store('signalUrl', $('signalUrl').value.trim());
+    store('iceServers', $('iceServers').value.trim());
+
+    teardown();
+    const mine = attempt;
+    $('connectBtn').disabled = true;
+    setStatus('正在准备连接…');
+    targetHostId = hostId;
+    sid = HD.randomId(12);
+    connectTimer = setTimeout(() => {
+      if (mine === attempt && !authed) fail('连接超时：两边网络无法直连（可能需要在高级设置里加 TURN 中继）。');
+    }, CONNECT_TIMEOUT);
+    startPeer(mine, { hostId, signalUrl, iceServers, password }).catch((e) => {
+      if (mine !== attempt) return;
+      fail(e && e.signal ? '无法连接信令服务器，请检查网络。' : '建立连接失败。');
+    });
+  }
+
+  async function startPeer(mine, opts) {
+    const password = opts.password;
+    const keys = await HD.signalKeys(opts.hostId);
+    const conn = new RTCPeerConnection({ iceServers: opts.iceServers, bundlePolicy: 'max-bundle' });
+    pc = conn;
+    ctl = conn.createDataChannel('ctl');
+    const bulkChannel = conn.createDataChannel('bulk');
+    bulk = new HD.Bulk(bulkChannel, onBulkStart);
+
+    // The offer carries the first candidates; later ones go over the control channel.
+    conn.onicecandidate = (ev) => {
+      if (ev.candidate && mine === attempt && authed) ctlSend({ t: 'ice', candidate: ev.candidate.toJSON() });
+    };
+    conn.onconnectionstatechange = () => {
+      if (mine !== attempt) return;
+      if (conn.connectionState === 'failed') fail(inSession ? '连接已断开。' : '无法建立点对点连接（两边网络可能需要 TURN 中继）。');
+    };
+    conn.ontrack = (ev) => {
+      if (mine !== attempt) return;
+      const stream = ev.streams[0] || new MediaStream([ev.track]);
+      if (video.srcObject !== stream) video.srcObject = stream;
+      try { if (ev.track.kind === 'video') ev.receiver.jitterBufferTarget = 0; } catch (e) { /* older browser */ }
+      video.play().catch(() => toast('点一下画面即可开始播放声音。', { ms: 8000 }));
+    };
+    ctl.onopen = () => { if (mine === attempt) setStatus('正在验证密码…'); };
+    ctl.onmessage = (ev) => {
+      if (mine !== attempt || typeof ev.data !== 'string') return;
+      let m;
+      try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (m && typeof m.t === 'string') onCtl(m, password).catch(() => {});
+    };
+    ctl.onclose = () => {
+      if (mine !== attempt) return;
+      fail(inSession ? '连接已断开。' : '连接被对方关闭。');
+    };
+
+    await conn.setLocalDescription(await conn.createOffer());
+    await HD.gathered(conn);
+    if (mine !== attempt) return;
+
+    // Listen for the answer first, then publish the offer.
+    setStatus('正在呼叫家里的电脑…');
+    try {
+      const topic = await HD.answerTopic(opts.hostId, sid);
+      await new Promise((resolve, reject) => {
+        signal = new HD.Subscription({
+          base: opts.signalUrl,
+          topic,
+          reconnect: false,
+          onState: (st) => { if (st === 'open') resolve(); else if (st === 'closed') reject(new Error('closed')); },
+          onText: (text) => { if (mine === attempt) onAnswer(keys.key, text).catch(() => {}); },
+        });
+        signal.connect();
+      });
+      if (mine !== attempt) return;
+      const offer = await HD.seal(keys.key, { type: 'offer', sid, sdp: conn.localDescription.sdp });
+      await HD.publish(opts.signalUrl, keys.offerTopic, offer);
+    } catch (e) {
+      throw Object.assign(new Error('signaling failed'), { signal: true });
+    }
+    if (mine !== attempt) return;
+    answerTimer = setTimeout(() => {
+      if (mine === attempt && !remoteSet) fail('家里的电脑没有应答：HomeDesk 没有运行、电脑在睡眠，或 Host ID 不对。');
+    }, ANSWER_TIMEOUT);
+  }
+
+  async function onAnswer(key, text) {
+    const m = await HD.unseal(key, text);
+    if (!pc || remoteSet || !m || m.type !== 'answer' || m.sid !== sid || typeof m.sdp !== 'string') return;
+    remoteSet = true;
+    clearTimeout(answerTimer);
+    setStatus('正在建立点对点连接…');
+    await pc.setRemoteDescription({ type: 'answer', sdp: m.sdp });
+  }
+
+  // ---------- control channel ----------
+
+  async function onCtl(m, password) {
+    if (!authed) {
+      if (m.t === 'challenge') await answerChallenge(m, password);
+      else if (m.t === 'auth-ok') finishAuth(m);
+      else if (m.t === 'auth-fail') {
+        fail(m.reason === 'locked'
+          ? `密码错误次数过多，家里电脑已暂时锁定，请约 ${Math.ceil((m.wait || 0) / 60000)} 分钟后再试。`
+          : '密码错误。');
+      }
+      return;
+    }
+    switch (m.t) {
+      case 'sdp':
+        if (m.desc && m.desc.type === 'offer' && typeof m.desc.sdp === 'string') {
+          await pc.setRemoteDescription(m.desc);
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription({ type: 'answer', sdp: HD.tuneOpus(answer.sdp) });
+          ctlSend({ t: 'sdp', desc: { type: 'answer', sdp: pc.localDescription.sdp } });
+        }
+        break;
+      case 'ice':
+        if (m.candidate) await pc.addIceCandidate(m.candidate);
+        break;
+      case 'display':
+        if (typeof m.id === 'string') $('displaySel').value = m.id;
+        if (m.audio === false) toast('家里电脑没有采集到系统声音。', { ms: 8000 });
+        break;
+      case 'displays':
+        renderDisplays(m.displays);
+        break;
+      case 'clip-ack': {
+        const waiters = ackWaiters;
+        ackWaiters = [];
+        for (const resolve of waiters) resolve();
+        break;
+      }
+      case 'clip-files':
+        offerFiles(m.files);
+        break;
+      case 'file-result':
+        toast(m.ok ? `已保存到家里电脑的「下载/HomeDesk」：${m.name}` : `文件发送失败：${m.name}`);
+        break;
+      case 'error':
+        toast(String(m.message || '家里电脑报告了一个错误'), { ms: 8000 });
+        break;
+      case 'bye':
+        fail({
+          replaced: '另一台设备连接了这台电脑，本连接已断开。',
+          kicked: '家里电脑端手动断开了连接。',
+          'password changed': '密码已更改，请重新连接。',
+        }[m.reason] || '连接已结束。');
+        break;
+    }
+  }
+
+  async function answerChallenge(m, password) {
+    const okShape = /^[0-9a-f]{32}$/.test(m.salt) && /^[0-9a-f]{32}$/.test(m.nonceH)
+      && Number.isInteger(m.iterations) && m.iterations >= ITERATION_RANGE[0] && m.iterations <= ITERATION_RANGE[1];
+    const fpViewer = HD.fingerprint(pc.localDescription && pc.localDescription.sdp);
+    const fpHost = HD.fingerprint(pc.remoteDescription && pc.remoteDescription.sdp);
+    if (!okShape || !fpViewer || !fpHost || expectedHostProof) { fail('对方的握手数据不正常，已中止。'); return; }
+    const key = await HD.deriveKey(password, m.salt, m.iterations);
+    const nonceV = HD.toHex(crypto.getRandomValues(new Uint8Array(16)));
+    const proof = await HD.hmacHex(key, HD.proofInput('viewer', m.nonceH, nonceV, fpViewer, fpHost));
+    expectedHostProof = await HD.hmacHex(key, HD.proofInput('host', m.nonceH, nonceV, fpViewer, fpHost));
+    ctlSend({ t: 'auth', nonceV, proof });
+  }
+
+  function finishAuth(m) {
+    // The host must prove it knows the password too, bound to this exact connection.
+    if (!expectedHostProof || m.proof !== expectedHostProof) { fail('安全校验失败：对方无法证明自己是你的电脑，已中止。'); return; }
+    authed = true;
+    clearTimeout(connectTimer);
+    if (signal) signal.close();
+    signal = null;
+    $('password').value = '';
+    setStatus('');
+    enterSession(m);
+  }
+
+  // ---------- session ui ----------
+
+  function renderDisplays(displays) {
+    const select = $('displaySel');
+    const current = select.value;
+    select.textContent = '';
+    for (const d of Array.isArray(displays) ? displays : []) {
+      const option = document.createElement('option');
+      option.value = String(d.id);
+      option.textContent = String(d.label);
+      select.appendChild(option);
+    }
+    if (current) select.value = current;
+  }
+
+  function enterSession(info) {
+    inSession = true;
+    // Playing a PC's own captured sound back on the same PC feeds back into a howl.
+    const sameMachine = !!selfHostId && targetHostId === selfHostId;
+    setMuted(sameMachine);
+    if (sameMachine) toast('你连接的是这台电脑自己，声音已静音以免啸叫。连接别的电脑时不会静音。', { ms: 10000 });
+    $('hostName').textContent = String(info.hostname || 'Home PC');
+    renderDisplays(info.displays);
+    $('connect').classList.add('hidden');
+    $('session').classList.remove('hidden');
+    stage.focus();
+    lastText = null;
+    lastImage = '';
+    statsTimer = setInterval(() => { pollStats().catch(() => {}); }, 2000);
+    if (clipReadable) clipTimer = setInterval(() => { syncLocalClipboard(false); }, 1000);
+    sendQuality();
+    if (isTouch && !store('touchHelp')) {
+      store('touchHelp', '1');
+      toast('点一下＝左键，长按＝右键，长按后拖动＝拖拽；两指捏合＝放大，放大后单指拖动＝移动画面，两指上下拖＝滚动；打字点「键盘」。', { ms: 15000 });
+    }
+  }
+
+  function setMuted(muted) {
+    video.muted = muted;
+    $('muteBtn').textContent = muted ? '取消静音' : '静音';
+  }
+
+  function sendQuality() {
+    ctlSend({ t: 'quality', bitrate: Number($('qualitySel').value), hint: $('hintSel').value });
+  }
+
+  async function pollStats() {
+    if (!pc || !inSession) return;
+    const report = await pc.getStats();
+    let inbound = null;
+    let pair = null;
+    report.forEach((r) => {
+      if (r.type === 'inbound-rtp' && r.kind === 'video') inbound = r;
+      if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') pair = r;
+    });
+    if (!inbound) return;
+    const parts = [];
+    if (inbound.frameWidth) parts.push(`${inbound.frameWidth}x${inbound.frameHeight}`);
+    if (inbound.framesPerSecond !== undefined) parts.push(`${Math.round(inbound.framesPerSecond)} fps`);
+    if (lastStats && inbound.timestamp > lastStats.timestamp) {
+      const bits = (inbound.bytesReceived - lastStats.bytes) * 8;
+      parts.push(`${(bits / (inbound.timestamp - lastStats.timestamp) / 1000).toFixed(1)} Mbps`);
+    }
+    lastStats = { timestamp: inbound.timestamp, bytes: inbound.bytesReceived };
+    if (pair) {
+      if (pair.currentRoundTripTime !== undefined) parts.push(`${Math.round(pair.currentRoundTripTime * 1000)} ms`);
+      const local = report.get(pair.localCandidateId);
+      const remote = report.get(pair.remoteCandidateId);
+      const relayed = (local && local.candidateType === 'relay') || (remote && remote.candidateType === 'relay');
+      parts.push(relayed ? '中继' : '直连');
+    }
+    $('stats').textContent = parts.join(' · ');
+  }
+
+  // ---------- input ----------
+
+  function sendInput(message) {
+    if (gate) gate.then(() => ctlSend(message));
+    else ctlSend(message);
+  }
+
+  function pointerPosition(ev) {
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    if (!vw || !vh) return null;
+    const rect = video.getBoundingClientRect();
+    const scale = Math.min(rect.width / vw, rect.height / vh);
+    const w = vw * scale;
+    const h = vh * scale;
+    const x = (ev.clientX - (rect.left + (rect.width - w) / 2)) / w;
+    const y = (ev.clientY - (rect.top + (rect.height - h) / 2)) / h;
+    return { x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)) };
+  }
+
+  function flushMove() {
+    moveScheduled = false;
+    if (!pendingMove) return;
+    sendInput({ t: 'mm', x: pendingMove.x, y: pendingMove.y });
+    pendingMove = null;
+  }
+
+  function bindInput() {
+    window.addEventListener('mousemove', (ev) => {
+      if (!inSession || (ev.target !== video && !downButtons.size)) return;
+      const p = pointerPosition(ev);
+      if (!p) return;
+      pendingMove = p;
+      if (!moveScheduled) { moveScheduled = true; requestAnimationFrame(flushMove); }
+    });
+    video.addEventListener('mousedown', (ev) => {
+      if (!inSession) return;
+      ev.preventDefault();
+      stage.focus();
+      if (video.paused) video.play().catch(() => {});
+      const p = pointerPosition(ev);
+      if (!p) return;
+      pendingMove = p;
+      flushMove();
+      downButtons.add(ev.button);
+      sendInput({ t: 'mb', b: ev.button, d: 1 });
+    });
+    window.addEventListener('mouseup', (ev) => {
+      if (!inSession || !downButtons.has(ev.button)) return;
+      ev.preventDefault();
+      const p = pointerPosition(ev);
+      if (p) { pendingMove = p; flushMove(); }
+      downButtons.delete(ev.button);
+      sendInput({ t: 'mb', b: ev.button, d: 0 });
+    });
+    video.addEventListener('contextmenu', (ev) => ev.preventDefault());
+    video.addEventListener('auxclick', (ev) => ev.preventDefault());
+    video.addEventListener('wheel', (ev) => {
+      if (!inSession) return;
+      ev.preventDefault();
+      // Convert to Windows wheel units: 120 per notch.
+      const factor = ev.deltaMode === 1 ? 40 : ev.deltaMode === 2 ? 360 : 1.2;
+      wheelY += -ev.deltaY * factor;
+      wheelX += ev.deltaX * factor;
+      const dy = Math.trunc(wheelY);
+      const dx = Math.trunc(wheelX);
+      wheelY -= dy;
+      wheelX -= dx;
+      if (dy || dx) sendInput({ t: 'mw', dy, dx });
+    }, { passive: false });
+
+    const onKey = (ev, down) => {
+      if (!inSession) return;
+      const tag = ev.target && ev.target.tagName;
+      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+      ev.preventDefault();
+      if (!ev.code) return;
+      // Push this PC's clipboard across before the paste keystroke lands.
+      if (down && !ev.repeat && ev.code === 'KeyV' && (ev.ctrlKey || ev.metaKey)) openClipGate();
+      sendInput({ t: 'k', c: ev.code, d: down ? 1 : 0 });
+    };
+    window.addEventListener('keydown', (ev) => onKey(ev, true));
+    window.addEventListener('keyup', (ev) => onKey(ev, false));
+
+    window.addEventListener('blur', () => {
+      if (!inSession) return;
+      downButtons.clear();
+      ctlSend({ t: 'rel' });
+    });
+    window.addEventListener('focus', () => {
+      if (!inSession) return;
+      applyPendingWrite().then(() => syncLocalClipboard(true));
+    });
+    window.addEventListener('beforeunload', (ev) => {
+      if (!inSession) return;
+      ev.preventDefault();
+      ev.returnValue = '';
+    });
+  }
+
+  function sendCombo(combo) {
+    const codes = combo.split('+');
+    for (const c of codes) sendInput({ t: 'k', c, d: 1 });
+    for (const c of codes.reverse()) sendInput({ t: 'k', c, d: 0 });
+  }
+
+  // ---------- touch (iPhone / iPad) ----------
+  // tap = left click · long press = right click · long press then move = drag
+  // pinch = zoom the picture · one finger while zoomed = pan · two fingers up/down = wheel
+
+  const LONG_PRESS = 450;
+  const SLOP = 10;
+  const PINCH_START = 24;
+  const MAX_ZOOM = 5;
+  let zoom = 1;
+  let panX = 0;
+  let panY = 0;
+  let gesture = null;
+
+  function applyView() {
+    const w = stage.clientWidth;
+    const h = stage.clientHeight;
+    zoom = Math.min(MAX_ZOOM, Math.max(1, zoom));
+    panX = Math.min(0, Math.max(w - w * zoom, panX));
+    panY = Math.min(0, Math.max(h - h * zoom, panY));
+    video.style.transform = zoom === 1 ? '' : `translate(${panX}px, ${panY}px) scale(${zoom})`;
+  }
+
+  function resetTouch() {
+    if (gesture) clearTimeout(gesture.timer);
+    if (gesture && gesture.mode === 'drag') sendInput({ t: 'mb', b: 0, d: 0 });
+    gesture = null;
+    zoom = 1; panX = 0; panY = 0;
+    video.style.transform = '';
+  }
+
+  function moveTo(pt) {
+    const p = pointerPosition(pt);
+    if (!p) return false;
+    pendingMove = p;
+    flushMove();
+    return true;
+  }
+
+  function clickAt(pt, button) {
+    if (!moveTo(pt)) return;
+    sendInput({ t: 'mb', b: button, d: 1 });
+    sendInput({ t: 'mb', b: button, d: 0 });
+  }
+
+  function twoFinger(ts) {
+    const r = stage.getBoundingClientRect();
+    const a = ts[0];
+    const b = ts[1];
+    return {
+      dist: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY),
+      x: (a.clientX + b.clientX) / 2 - r.left,
+      y: (a.clientY + b.clientY) / 2 - r.top,
+      clientX: (a.clientX + b.clientX) / 2,
+      clientY: (a.clientY + b.clientY) / 2,
+    };
+  }
+
+  function onTouchStart(ev) {
+    if (!inSession) return;
+    ev.preventDefault();
+    if (video.paused) video.play().catch(() => {});
+    const ts = ev.touches;
+    if (ts.length === 1 && !gesture) {
+      const t = ts[0];
+      const g = { mode: 'pending', x0: t.clientX, y0: t.clientY, x: t.clientX, y: t.clientY, timer: 0 };
+      g.timer = setTimeout(() => {
+        if (gesture !== g || g.mode !== 'pending') return;
+        g.mode = 'held';
+        if (navigator.vibrate) navigator.vibrate(10);
+        moveTo({ clientX: g.x, clientY: g.y });
+      }, LONG_PRESS);
+      gesture = g;
+    } else if (ts.length >= 2) {
+      if (gesture) {
+        clearTimeout(gesture.timer);
+        if (gesture.mode === 'drag') sendInput({ t: 'mb', b: 0, d: 0 });
+      }
+      const f = twoFinger(ts);
+      gesture = { mode: 'two', start: f, last: f, zoom0: zoom, panX0: panX, panY0: panY, sub: '' };
+    }
+  }
+
+  function onTouchMove(ev) {
+    if (!inSession || !gesture) return;
+    ev.preventDefault();
+    const g = gesture;
+    const ts = ev.touches;
+    if (g.mode === 'two') {
+      if (ts.length < 2) return;
+      const f = twoFinger(ts);
+      if (!g.sub) {
+        if (Math.abs(f.dist - g.start.dist) > PINCH_START) g.sub = 'pinch';
+        else if (Math.hypot(f.x - g.start.x, f.y - g.start.y) > SLOP) {
+          g.sub = 'scroll';
+          moveTo(g.start);       // scroll whatever window is under the fingers
+        }
+      }
+      if (g.sub === 'pinch') {
+        // keep the spot between the fingers under the fingers
+        const cx = (g.start.x - g.panX0) / g.zoom0;
+        const cy = (g.start.y - g.panY0) / g.zoom0;
+        zoom = g.zoom0 * f.dist / g.start.dist;
+        zoom = Math.min(MAX_ZOOM, Math.max(1, zoom));
+        panX = f.x - cx * zoom;
+        panY = f.y - cy * zoom;
+        applyView();
+      } else if (g.sub === 'scroll') {
+        // natural scrolling: fingers up = page moves up = wheel down
+        wheelY += (f.y - g.last.y) * 4;
+        wheelX += -(f.x - g.last.x) * 4;
+        const dy = Math.trunc(wheelY);
+        const dx = Math.trunc(wheelX);
+        wheelY -= dy;
+        wheelX -= dx;
+        if (dy || dx) sendInput({ t: 'mw', dy, dx });
+      }
+      g.last = f;
+      return;
+    }
+    if (g.mode === 'done') return;
+    const t = ts[0];
+    const dx = t.clientX - g.x;
+    const dy = t.clientY - g.y;
+    g.x = t.clientX;
+    g.y = t.clientY;
+    const far = Math.hypot(g.x - g.x0, g.y - g.y0) > SLOP;
+    if (g.mode === 'pending' && far) { clearTimeout(g.timer); g.mode = 'pan'; }
+    else if (g.mode === 'held' && far) {
+      g.mode = 'drag';
+      moveTo({ clientX: g.x0, clientY: g.y0 });
+      sendInput({ t: 'mb', b: 0, d: 1 });
+    }
+    if (g.mode === 'pan') {
+      panX += dx;
+      panY += dy;
+      applyView();
+    } else if (g.mode === 'drag') {
+      const p = pointerPosition(t);
+      if (p) {
+        pendingMove = p;
+        if (!moveScheduled) { moveScheduled = true; requestAnimationFrame(flushMove); }
+      }
+    }
+  }
+
+  function onTouchEnd(ev) {
+    if (!inSession || !gesture) return;
+    ev.preventDefault();
+    const g = gesture;
+    clearTimeout(g.timer);
+    if (ev.type === 'touchend') {
+      const pt = { clientX: g.x, clientY: g.y };
+      if (g.mode === 'pending') clickAt(pt, 0);
+      else if (g.mode === 'held') clickAt(pt, 2);
+    }
+    if (g.mode === 'drag') {
+      moveTo({ clientX: g.x, clientY: g.y });
+      sendInput({ t: 'mb', b: 0, d: 0 });
+    }
+    // after a two-finger gesture, wait until every finger is up before starting a new one
+    if (ev.touches.length) { g.mode = 'done'; return; }
+    gesture = null;
+  }
+
+  async function sendText(text) {
+    if (!text || !bulk) return false;
+    const bytes = new TextEncoder().encode(text);
+    if (bytes.byteLength > MAX_CLIP_TEXT) return false;
+    // Goes through the home PC's clipboard, so any language works, then pastes it.
+    lastText = normalizeText(text);
+    await bulk.send({ kind: 'clip-text' }, HD.memSource(bytes));
+    await waitForAck();
+    sendCombo('ControlLeft+KeyV');
+    return true;
+  }
+
+  function bindTouch() {
+    document.body.classList.add('touch');
+    stage.addEventListener('touchstart', onTouchStart, { passive: false });
+    stage.addEventListener('touchmove', onTouchMove, { passive: false });
+    stage.addEventListener('touchend', onTouchEnd, { passive: false });
+    stage.addEventListener('touchcancel', onTouchEnd, { passive: false });
+    window.addEventListener('resize', () => { if (zoom > 1) applyView(); });
+
+    $('kbBtn').onclick = () => {
+      const open = $('kb').classList.toggle('hidden') === false;
+      $('kbBtn').classList.toggle('primary', open);
+      if (open) $('kbText').focus();
+    };
+    $('kbSend').onclick = () => {
+      const text = $('kbText').value;
+      if (!text) return;
+      sendText(text).then((ok) => {
+        if (ok) $('kbText').value = '';
+        else toast('文字太长或连接已断开，没有发出去。');
+      }, () => toast('发送失败。'));
+    };
+    for (const button of $('kb').querySelectorAll('button[data-combo]')) {
+      button.onclick = () => sendCombo(button.dataset.combo);
+    }
+  }
+
+  // ---------- clipboard ----------
+
+  function normalizeText(text) {
+    return text.replace(/\r\n/g, '\n');
+  }
+
+  async function sha256(bytes) {
+    return HD.toHex(await crypto.subtle.digest('SHA-256', bytes));
+  }
+
+  function waitForAck() {
+    return new Promise((resolve) => {
+      ackWaiters.push(resolve);
+      setTimeout(resolve, ACK_TIMEOUT);
+    });
+  }
+
+  async function noteClipError(e) {
+    if (!e || e.name !== 'NotAllowedError' || !document.hasFocus() || !navigator.permissions) return;
+    try {
+      const status = await navigator.permissions.query({ name: 'clipboard-read' });
+      if (status.state === 'denied' && clipReadable) {
+        clipReadable = false;
+        toast('浏览器不允许读取剪贴板，所以无法把这台电脑复制的内容带到家里电脑。可在地址栏的网站权限里允许“剪贴板”。', { ms: 12000 });
+      }
+    } catch (e2) { /* permission name not supported */ }
+  }
+
+  async function readLocalImage() {
+    if (!navigator.clipboard.read) return null;
+    const items = await withTimeout(navigator.clipboard.read(), CLIP_READ_TIMEOUT);
+    for (const item of items) {
+      if (!item.types.includes('image/png')) continue;
+      const blob = await item.getType('image/png');
+      if (blob.size > MAX_CLIP_IMAGE) return null;
+      return new Uint8Array(await blob.arrayBuffer());
+    }
+    return null;
+  }
+
+  // deep: also look for a copied image (costly, so only on focus and on paste).
+  async function doSync(deep, waitAck) {
+    if (!inSession || !bulk || !clipReadable || !document.hasFocus()) return;
+    let sent = false;
+    try {
+      const text = await withTimeout(navigator.clipboard.readText(), CLIP_READ_TIMEOUT);
+      if (text) {
+        const normalized = normalizeText(text);
+        if (normalized !== lastText) {
+          const bytes = new TextEncoder().encode(text);
+          if (bytes.byteLength > MAX_CLIP_TEXT) return;
+          lastText = normalized;
+          await bulk.send({ kind: 'clip-text' }, HD.memSource(bytes));
+          sent = true;
+        }
+      } else if (deep) {
+        const bytes = await readLocalImage();
+        if (bytes) {
+          const hash = await sha256(bytes);
+          if (hash !== lastImage) {
+            lastImage = hash;
+            await bulk.send({ kind: 'clip-image' }, HD.memSource(bytes));
+            sent = true;
+          }
+        }
+      }
+    } catch (e) {
+      await noteClipError(e);
+      return;
+    }
+    if (sent && waitAck) await waitForAck();
+  }
+
+  function syncLocalClipboard(deep, waitAck) {
+    const run = syncChain.then(() => doSync(deep, waitAck));
+    syncChain = run.catch(() => {});
+    return syncChain;
+  }
+
+  function openClipGate() {
+    const previous = gate || Promise.resolve();
+    const mine = previous.then(() => syncLocalClipboard(true, true)).then(() => { if (gate === mine) gate = null; });
+    gate = mine;
+  }
+
+  async function writeLocal(item) {
+    try {
+      if (item.text !== undefined) {
+        await navigator.clipboard.writeText(item.text);
+      } else {
+        await navigator.clipboard.write([new ClipboardItem({ 'image/png': new Blob([item.image], { type: 'image/png' }) })]);
+        // Browsers re-encode images; remember what is really there so it is not sent back.
+        try {
+          const back = await readLocalImage();
+          if (back) lastImage = await sha256(back);
+        } catch (e) { /* will be compared on the next deep sync instead */ }
+      }
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  async function applyRemoteClip(item) {
+    if (item.text !== undefined) lastText = normalizeText(item.text);
+    // Writing needs this page to be focused; otherwise keep it for the next focus.
+    if (await writeLocal(item)) return;
+    pendingWrite = item;
+    // iOS only writes the clipboard inside a tap, so offer a button for text.
+    if (isTouch && item.text !== undefined) {
+      if (clipToast) clipToast.close();
+      clipToast = toast(`家里电脑复制了：${item.text.slice(0, 40)}${item.text.length > 40 ? '…' : ''}`, {
+        sticky: true,
+        label: '复制到手机',
+        action: () => { navigator.clipboard.writeText(item.text).then(() => { pendingWrite = null; }, () => {}); },
+      });
+      clipToast.close(30000);
+    }
+  }
+
+  let clipToast = null;
+
+  async function applyPendingWrite() {
+    const item = pendingWrite;
+    if (!item) return;
+    pendingWrite = null;
+    if (!(await writeLocal(item))) pendingWrite = item;
+  }
+
+  // ---------- files ----------
+
+  function onBulkStart(meta) {
+    if (!authed) return null;
+    if (meta.kind === 'clip-text' && meta.size <= MAX_CLIP_TEXT) {
+      return HD.memSink((bytes) => applyRemoteClip({ text: new TextDecoder().decode(bytes) }));
+    }
+    if (meta.kind === 'clip-image' && meta.size <= MAX_CLIP_IMAGE) {
+      return HD.memSink((bytes) => applyRemoteClip({ image: bytes }));
+    }
+    if (meta.kind === 'file') {
+      if (meta.size > MAX_DOWNLOAD) {
+        toast(`文件太大，浏览器接收不了：${meta.name}（${formatSize(meta.size)}）`, { ms: 8000 });
+        return null;
+      }
+      const note = toast(`正在接收 ${meta.name}（${formatSize(meta.size)}）…`, { sticky: true });
+      const parts = [];
+      return {
+        write: async (chunk) => { parts.push(chunk); },
+        end: async () => {
+          const url = URL.createObjectURL(new Blob(parts));
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = meta.name || 'file';
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 60000);
+          note.set(`已下载：${meta.name}`);
+          note.close(5000);
+        },
+        abort: async () => {
+          parts.length = 0;
+          note.set(`接收失败：${meta.name}`);
+          note.close(5000);
+        },
+      };
+    }
+    return null;
+  }
+
+  let filesToast = null;
+
+  function offerFiles(files) {
+    if (!Array.isArray(files) || !files.length) return;
+    if (filesToast) filesToast.close();
+    const total = files.reduce((sum, f) => sum + (Number(f.size) || 0), 0);
+    const label = files.length === 1 ? String(files[0].name) : `${files.length} 个文件`;
+    filesToast = toast(`家里电脑复制了 ${label}（${formatSize(total)}）`, {
+      sticky: true,
+      label: '下载到这台电脑',
+      action: () => ctlSend({ t: 'get-files', indexes: files.map((f, i) => i) }),
+    });
+    filesToast.close(60000);
+  }
+
+  function sendFiles(fileList) {
+    if (!inSession || !bulk) return;
+    for (const file of Array.from(fileList)) {
+      const note = toast(`正在发送 ${file.name}…`, { sticky: true });
+      bulk.send({ kind: 'file', name: file.name }, {
+        size: file.size,
+        read: (offset, length) => file.slice(offset, offset + length).arrayBuffer(),
+      }, (done, total) => {
+        note.set(`正在发送 ${file.name}… ${total ? Math.floor(done * 100 / total) : 100}%`);
+      }).then(() => note.close(), () => { note.set(`发送失败：${file.name}`); note.close(5000); });
+    }
+  }
+
+  // ---------- wiring ----------
+
+  function bindUi() {
+    $('hostId').value = store('hostId') || '';
+    $('signalUrl').value = store('signalUrl') || '';
+    $('signalUrl').placeholder = HD.DEFAULT_SIGNAL_URL;
+    $('iceServers').value = store('iceServers') || '';
+    $('iceServers').placeholder = JSON.stringify(HD.DEFAULT_ICE);
+
+    $('connectBtn').onclick = connect;
+    $('password').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') connect(); });
+    $('hostId').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') $('password').focus(); });
+
+    $('displaySel').onchange = () => { ctlSend({ t: 'display', id: $('displaySel').value }); stage.focus(); };
+    $('qualitySel').onchange = () => { sendQuality(); stage.focus(); };
+    $('hintSel').onchange = () => { sendQuality(); stage.focus(); };
+    $('keySel').onchange = () => {
+      const combo = $('keySel').value;
+      $('keySel').value = '';
+      stage.focus();
+      if (combo) sendCombo(combo);
+    };
+    $('muteBtn').onclick = () => {
+      setMuted(!video.muted);
+      stage.focus();
+    };
+    $('fileBtn').onclick = () => $('filePick').click();
+    $('filePick').onchange = () => {
+      sendFiles($('filePick').files);
+      $('filePick').value = '';
+      stage.focus();
+    };
+    $('fullBtn').onclick = () => {
+      if (document.fullscreenElement) {
+        document.exitFullscreen().catch(() => {});
+      } else {
+        $('session').requestFullscreen().then(() => {
+          // Lets Alt+Tab, the Windows key and friends reach the home PC while fullscreen.
+          if (navigator.keyboard && navigator.keyboard.lock) navigator.keyboard.lock().catch(() => {});
+        }).catch(() => {});
+      }
+      stage.focus();
+    };
+    $('closeBtn').onclick = () => {
+      ctlSend({ t: 'bye' });
+      const mine = attempt;
+      // Let the goodbye leave before the connection is torn down.
+      setTimeout(() => { if (mine === attempt) fail('已断开。'); }, 150);
+    };
+
+    stage.addEventListener('dragover', (ev) => {
+      if (!inSession) return;
+      ev.preventDefault();
+      stage.classList.add('drop');
+    });
+    stage.addEventListener('dragleave', () => stage.classList.remove('drop'));
+    stage.addEventListener('drop', (ev) => {
+      ev.preventDefault();
+      stage.classList.remove('drop');
+      if (ev.dataTransfer && ev.dataTransfer.files.length) sendFiles(ev.dataTransfer.files);
+    });
+  }
+
+  bindUi();
+  bindInput();
+  // iPhone Safari cannot put a page element fullscreen.
+  if (!document.documentElement.requestFullscreen) $('fullBtn').classList.add('hidden');
+  if (isTouch) bindTouch();
+})();
+
+</script>
+</body>
+</html>
