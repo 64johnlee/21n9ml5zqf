@@ -43,6 +43,7 @@
   #toasts { position:absolute; right:12px; bottom:12px; display:flex; flex-direction:column; gap:8px; align-items:flex-end; z-index:6; pointer-events:none; }
   .toast { pointer-events:auto; background:var(--card); border:1px solid var(--line); border-radius:9px; padding:8px 12px; max-width:380px; display:flex; gap:10px; align-items:center; box-shadow:0 6px 24px rgba(0,0,0,.5); }
   .toast span { overflow-wrap:anywhere; }
+  #stall { position:absolute; top:10px; left:50%; transform:translateX(-50%); z-index:30; max-width:90%; padding:8px 14px; border-radius:8px; background:rgba(190,60,30,.94); color:#fff; font-size:15px; text-align:center; pointer-events:none; box-shadow:0 4px 18px rgba(0,0,0,.5); }
 
   /* phones and tablets */
   .touch-only { display:none; }
@@ -51,7 +52,9 @@
   body.touch #screen { transform-origin:0 0; }
   body.touch #bar { gap:6px; padding:4px 6px; flex-wrap:nowrap; overflow-x:auto; -webkit-overflow-scrolling:touch; }
   body.touch #bar > * { flex:none; }
-  body.touch #stats { display:none; }
+  /* phones: the stats line used to be hidden; show it as a small overlay so a frozen picture can be diagnosed */
+  body.touch #stats { position:fixed; left:6px; bottom:6px; z-index:25; margin:0; padding:2px 6px; background:rgba(0,0,0,.55); color:#ddd; border-radius:4px; font-size:11px; pointer-events:none; }
+  body.touch #stats:empty { display:none; }
   body.touch #session { height:100dvh; }
   body.touch input[type=text], body.touch input[type=password], body.touch textarea { font-size:16px; }
   #kb { background:var(--card); border-bottom:1px solid var(--line); padding:6px; display:flex; flex-direction:column; gap:6px; }
@@ -78,6 +81,9 @@
         <input id="signalUrl" type="text" spellcheck="false">
         <label for="iceServers">ICE 服务器（JSON，可加 TURN）</label>
         <textarea id="iceServers" spellcheck="false"></textarea>
+        <label>诊断日志（死机、断线时用来查原因；不含密码）</label>
+        <button id="logBtn" type="button">导出诊断日志</button>
+        <button id="logClearBtn" type="button">清空日志</button>
       </details>
     </div>
   </div>
@@ -88,7 +94,8 @@
       <select id="displaySel" title="显示器"></select>
       <select id="qualitySel" title="画质">
         <option value="2000000">流畅 2M</option>
-        <option value="6000000" selected>标准 6M</option>
+        <option value="4000000" selected>均衡 4M</option>
+        <option value="6000000">标准 6M</option>
         <option value="12000000">高清 12M</option>
         <option value="25000000">极清 25M</option>
       </select>
@@ -139,6 +146,7 @@
     <div id="stage" tabindex="0">
       <video id="screen" autoplay playsinline></video>
       <div id="toasts"></div>
+      <div id="stall" class="hidden"></div>
     </div>
   </div>
 
@@ -499,6 +507,48 @@
     };
   }
 
+  // Like memSink, but every PACK bytes are folded into a Blob. A Blob lives in the
+  // browser's own blob store, which can spill to disk, so a large download no
+  // longer piles up as thousands of ArrayBuffers on the page's heap (what froze
+  // phone browsers). `onDone` receives one Blob.
+  const PACK = 8 * 1024 * 1024;
+
+  function blobSink(onDone) {
+    let blobs = [];
+    let pending = [];
+    let pendingBytes = 0;
+    const fold = () => {
+      if (!pendingBytes) return;
+      blobs.push(new Blob(pending));
+      pending = [];
+      pendingBytes = 0;
+    };
+    return {
+      write: async (chunk) => {
+        pending.push(chunk);
+        pendingBytes += chunk.byteLength;
+        if (pendingBytes >= PACK) fold();
+      },
+      end: async () => {
+        fold();
+        const all = new Blob(blobs);
+        blobs = [];
+        await onDone(all);
+      },
+      abort: async () => { blobs = []; pending = []; pendingBytes = 0; },
+    };
+  }
+
+  // Streams straight into a file the user picked with showSaveFilePicker
+  // (`writable` is a FileSystemWritableFileStream): nothing is kept in memory.
+  function streamSink(writable, onDone) {
+    return {
+      write: async (chunk) => { await writable.write(chunk); },
+      end: async () => { await writable.close(); if (onDone) await onDone(); },
+      abort: async () => { try { await writable.abort(); } catch (e) { /* already closed */ } },
+    };
+  }
+
   // ---- SDP helpers ----
 
   // Ask Opus for stereo at a music-grade bitrate; the default is mono voice.
@@ -545,7 +595,7 @@
     DEFAULT_SIGNAL_URL, DEFAULT_ICE,
     randomId, toHex, fromHex,
     signalKeys, answerTopic, seal, unseal, publish, Subscription, gathered,
-    Bulk, memSource, memSink,
+    Bulk, memSource, memSink, blobSink, streamSink,
     tuneOpus, fingerprint, proofInput, deriveKey, hmacHex,
   };
 })();
@@ -568,7 +618,7 @@
   const CLIP_READ_TIMEOUT = 800;
   const MAX_CLIP_TEXT = 20 * 1024 * 1024;
   const MAX_CLIP_IMAGE = 40 * 1024 * 1024;
-  const MAX_DOWNLOAD = 2 * 1024 * 1024 * 1024;
+  const MAX_DOWNLOAD_STREAM = 8 * 1024 * 1024 * 1024;   // saved straight into a file the user picked
   const ITERATION_RANGE = [100000, 2000000];
 
   let attempt = 0;
@@ -589,6 +639,43 @@
   let statsTimer = null;
   let clipTimer = null;
   let lastStats = null;
+
+  // ---------- frozen-picture watchdog ----------
+  // A static remote screen legitimately sends no new frames, so "no frames" alone proves nothing.
+  // The clock only starts when the user does something (pendingSince) and no new frame follows.
+  // After STALL_KICK_S we ask the host to restart its screen capture (a restarted capture always
+  // emits a fresh frame, so a merely static screen recovers at once); if that still produces no frame
+  // within STALL_FAIL_AFTER_KICK_S the picture is really dead and we disconnect with a clear message.
+  const STALL_BANNER_S = 8;
+  const STALL_KICK_S = 10;
+  const STALL_FAIL_AFTER_KICK_S = 12;
+  const STALL_KICK_GAP_S = 30;
+
+  // <stall-step>
+  function newStallState() { return { key: null, pendingSince: 0, kickedAt: 0, lastKickAt: 0 }; }
+
+  // st: the state above; now: ms; key: anything that changes whenever a new frame arrives.
+  // Returns { secs, action } with action 'ok' | 'banner' | 'kick' | 'fail'.
+  function stallStep(st, now, key) {
+    if (key !== st.key) {
+      st.key = key; st.pendingSince = 0; st.kickedAt = 0;
+      return { secs: 0, action: 'ok' };
+    }
+    if (!st.pendingSince) return { secs: 0, action: 'ok' };
+    const secs = (now - st.pendingSince) / 1000;
+    if (st.kickedAt && (now - st.kickedAt) / 1000 >= STALL_FAIL_AFTER_KICK_S) return { secs, action: 'fail' };
+    if (!st.kickedAt && secs >= STALL_KICK_S && (now - st.lastKickAt) / 1000 >= STALL_KICK_GAP_S) {
+      st.kickedAt = now; st.lastKickAt = now;
+      return { secs, action: 'kick' };
+    }
+    if (secs >= STALL_BANNER_S) return { secs, action: 'banner' };
+    return { secs, action: 'ok' };
+  }
+  // </stall-step>
+
+  let stallSt = newStallState();
+  let stallShown = false;
+  let lastPair = null;
 
   // Phones and tablets: touch gestures instead of a mouse, and a typing panel.
   const isTouch = !!(window.matchMedia && matchMedia('(pointer: coarse)').matches);
@@ -620,6 +707,34 @@
       localStorage.setItem('homedesk.' + key, value);
     } catch (e) { /* storage unavailable, settings just do not persist */ }
     return null;
+  }
+
+  // ---------- diagnostics log ----------
+  // The last LOG_LINES lines live in localStorage so they survive a page that froze or was
+  // killed; "导出诊断日志" under 高级设置 downloads them. Passwords are never logged.
+  const LOG_LINES = 400;
+  let logBuf = [];
+  let logDirty = false;
+  try {
+    logBuf = JSON.parse(store('log') || '[]');
+    if (!Array.isArray(logBuf)) logBuf = [];
+  } catch (e) { logBuf = []; }
+
+  function vlog(text) {
+    logBuf.push(new Date().toISOString() + ' ' + text);
+    if (logBuf.length > LOG_LINES) logBuf = logBuf.slice(-LOG_LINES);
+    logDirty = true;
+  }
+
+  function flushLog() {
+    if (!logDirty) return;
+    logDirty = false;
+    store('log', JSON.stringify(logBuf));
+  }
+
+  function memoryNote() {
+    const m = window.performance && performance.memory;   // Chromium only
+    return m ? `JS堆 ${Math.round(m.usedJSHeapSize / 1048576)}MB/${Math.round(m.jsHeapSizeLimit / 1048576)}MB` : '';
   }
 
   function toast(text, opts) {
@@ -685,6 +800,8 @@
     authed = false; inSession = false; expectedHostProof = '';
     remoteSet = false;
     gate = null; pendingWrite = null; lastStats = null;
+    stallSt = newStallState(); stallShown = false; lastPair = null;
+    $('stall').classList.add('hidden');
     for (const resolve of ackWaiters) resolve();
     ackWaiters = [];
     downButtons.clear();
@@ -698,6 +815,7 @@
   }
 
   function fail(message) {
+    vlog('断开/失败：' + message);
     teardown();
     setStatus(message);
   }
@@ -744,6 +862,10 @@
     };
     conn.onconnectionstatechange = () => {
       if (mine !== attempt) return;
+      vlog('连接状态 ' + conn.connectionState);
+      // 'disconnected' used to be ignored, so a dropped network froze the picture with no message.
+      if (inSession && conn.connectionState === 'disconnected') showStall('网络连接暂时中断，正在尝试恢复…');
+      else if (inSession && conn.connectionState === 'connected' && !stallShown) $('stall').classList.add('hidden');
       if (conn.connectionState === 'failed') fail(inSession ? '连接已断开。' : '无法建立点对点连接（两边网络可能需要 TURN 中继）。');
     };
     conn.ontrack = (ev) => {
@@ -903,6 +1025,7 @@
 
   function enterSession(info) {
     inSession = true;
+    vlog('会话开始 ' + memoryNote());
     // Playing a PC's own captured sound back on the same PC feeds back into a howl.
     const sameMachine = !!selfHostId && targetHostId === selfHostId;
     setMuted(sameMachine);
@@ -917,9 +1040,9 @@
     statsTimer = setInterval(() => { pollStats().catch(() => {}); }, 2000);
     if (clipReadable) clipTimer = setInterval(() => { syncLocalClipboard(false); }, 1000);
     sendQuality();
-    if (isTouch && !store('touchHelp')) {
-      store('touchHelp', '1');
-      toast('点一下＝左键，长按＝右键，长按后拖动＝拖拽；两指捏合＝放大，放大后单指拖动＝移动画面，两指上下拖＝滚动；打字点「键盘」。', { ms: 15000 });
+    if (isTouch && !store('touchHelp2')) {
+      store('touchHelp2', '1');
+      toast('单指拖动＝移动鼠标，点一下＝左键，长按＝右键，长按后拖动＝拖拽；两指捏合＝放大，放大后单指拖动＝移动画面，两指上下拖＝滚动；打字点「键盘」。', { ms: 15000 });
     }
   }
 
@@ -932,6 +1055,50 @@
     ctlSend({ t: 'quality', bitrate: Number($('qualitySel').value), hint: $('hintSel').value });
   }
 
+  function showStall(text) {
+    const el = $('stall');
+    el.textContent = text;
+    el.classList.remove('hidden');
+  }
+
+  // Called every 2 s from pollStats with the inbound video report and the active candidate pair.
+  function watchStall(inbound, pair) {
+    const now = Date.now();
+    // Background tabs throttle timers and decoding; that is not a stall.
+    if (document.visibilityState !== 'visible') { stallSt.pendingSince = 0; return; }
+    const key = inbound.framesDecoded !== undefined ? inbound.framesDecoded : inbound.bytesReceived;
+    const verdict = stallStep(stallSt, now, key);
+    const recv = pair ? pair.bytesReceived : null;
+    const answers = pair ? pair.responsesReceived : null;
+    const net = lastPair && recv !== null
+      ? `近2秒网络入站 ${recv - lastPair.recv} 字节，探测回应 +${(answers || 0) - (lastPair.answers || 0)}，往返 ${pair.currentRoundTripTime !== undefined ? Math.round(pair.currentRoundTripTime * 1000) + 'ms' : '未知'}`
+      : '网络状态未知';
+    lastPair = recv !== null ? { recv, answers } : null;
+
+    if (verdict.action === 'ok') {
+      if (stallShown) {
+        stallShown = false;
+        $('stall').classList.add('hidden');
+        vlog('画面恢复');
+      }
+      return;
+    }
+    if (!stallShown) {
+      stallShown = true;
+      vlog(`画面停止 ${Math.round(verdict.secs)} 秒；${net}；连接 ${pc ? pc.connectionState : '?'}；控制通道 ${ctl ? ctl.readyState : '?'}`);
+    }
+    if (verdict.action === 'kick') {
+      vlog('请求家里电脑重新抓屏');
+      showStall('画面停止，已请求家里电脑重新抓屏…');
+      ctlSend({ t: 'display', id: $('displaySel').value });
+    } else if (verdict.action === 'fail') {
+      vlog(`重新抓屏后仍无画面，自动断开；${net}`);
+      fail(`画面停止超过 ${Math.round(verdict.secs)} 秒，已自动断开。请重新连接。`);
+    } else {
+      showStall(stallSt.kickedAt ? '已请求重新抓屏，仍在等待画面…' : `画面 ${Math.round(verdict.secs)} 秒没有更新，正在等待…`);
+    }
+  }
+
   async function pollStats() {
     if (!pc || !inSession) return;
     const report = await pc.getStats();
@@ -942,6 +1109,8 @@
       if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') pair = r;
     });
     if (!inbound) return;
+    watchStall(inbound, pair);
+    if (!inSession) return;   // the watchdog may have just disconnected
     const parts = [];
     if (inbound.frameWidth) parts.push(`${inbound.frameWidth}x${inbound.frameHeight}`);
     if (inbound.framesPerSecond !== undefined) parts.push(`${Math.round(inbound.framesPerSecond)} fps`);
@@ -963,6 +1132,8 @@
   // ---------- input ----------
 
   function sendInput(message) {
+    // Start the frozen-picture clock at the first input that no new frame has answered yet.
+    if (inSession && !stallSt.pendingSince) stallSt.pendingSince = Date.now();
     if (gate) gate.then(() => ctlSend(message));
     else ctlSend(message);
   }
@@ -1192,7 +1363,8 @@
     g.x = t.clientX;
     g.y = t.clientY;
     const far = Math.hypot(g.x - g.x0, g.y - g.y0) > SLOP;
-    if (g.mode === 'pending' && far) { clearTimeout(g.timer); g.mode = 'pan'; }
+    // not zoomed in: one finger drags the home PC's pointer along without clicking
+    if (g.mode === 'pending' && far) { clearTimeout(g.timer); g.mode = zoom > 1 ? 'pan' : 'hover'; }
     else if (g.mode === 'held' && far) {
       g.mode = 'drag';
       moveTo({ clientX: g.x0, clientY: g.y0 });
@@ -1202,7 +1374,7 @@
       panX += dx;
       panY += dy;
       applyView();
-    } else if (g.mode === 'drag') {
+    } else if (g.mode === 'drag' || g.mode === 'hover') {
       const p = pointerPosition(t);
       if (p) {
         pendingMove = p;
@@ -1408,37 +1580,87 @@
       return HD.memSink((bytes) => applyRemoteClip({ image: bytes }));
     }
     if (meta.kind === 'file') {
-      if (meta.size > MAX_DOWNLOAD) {
-        toast(`文件太大，浏览器接收不了：${meta.name}（${formatSize(meta.size)}）`, { ms: 8000 });
+      // A file the user picked a save location for streams straight to disk; otherwise the
+      // browser has to hold it until the end, so the cap is lower (lowest on phones).
+      const saved = savedTarget;
+      savedTarget = null;
+      const blobLimit = (isTouch ? 512 : 2048) * 1024 * 1024;
+      const limit = saved ? MAX_DOWNLOAD_STREAM : blobLimit;
+      if (meta.size > limit) {
+        if (saved) saved.writable.abort().catch(() => {});
+        toast(`文件太大，这个浏览器接收不了：${meta.name}（${formatSize(meta.size)}，上限 ${formatSize(limit)}）。`
+          + (saved ? '' : '请用电脑上的 Chrome / Edge，或 HomeDesk 自带的 Viewer 下载。'), { ms: 12000 });
+        vlog(`拒收文件 ${meta.name} ${meta.size}B 超过上限 ${limit}B`);
         return null;
       }
       const note = toast(`正在接收 ${meta.name}（${formatSize(meta.size)}）…`, { sticky: true });
-      const parts = [];
-      return {
-        write: async (chunk) => { parts.push(chunk); },
-        end: async () => {
-          const url = URL.createObjectURL(new Blob(parts));
-          const link = document.createElement('a');
-          link.href = url;
-          link.download = meta.name || 'file';
-          document.body.appendChild(link);
-          link.click();
-          link.remove();
-          setTimeout(() => URL.revokeObjectURL(url), 60000);
-          note.set(`已下载：${meta.name}`);
-          note.close(5000);
-        },
-        abort: async () => {
-          parts.length = 0;
-          note.set(`接收失败：${meta.name}`);
-          note.close(5000);
-        },
+      vlog(`收文件开始 ${meta.name} ${meta.size}B ${saved ? '直接写入所选文件' : '分块缓存'} ${memoryNote()}`);
+      const failed = async (inner) => {
+        await inner.abort();
+        vlog(`收文件中断 ${meta.name}`);
+        note.set(`接收失败：${meta.name}`);
+        note.close(5000);
       };
+      if (saved) {
+        const inner = HD.streamSink(saved.writable, async () => {
+          vlog(`收文件完成 ${meta.name}`);
+          note.set(`已保存：${meta.name}`);
+          note.close(5000);
+        });
+        return {
+          write: inner.write,
+          // Closing the file can still fail (disk full); say so instead of leaving "正在接收" up.
+          end: async () => {
+            try { await inner.end(); } catch (e) {
+              vlog(`保存文件失败 ${meta.name}：${e && e.message}`);
+              note.set(`保存失败：${meta.name}（${(e && e.message) || '磁盘可能已满'}）`);
+              note.close(8000);
+            }
+          },
+          abort: () => failed(inner),
+        };
+      }
+      const inner = HD.blobSink(async (blob) => {
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = meta.name || 'file';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        // A big file takes a while to be read out to disk; do not pull it away too soon.
+        setTimeout(() => URL.revokeObjectURL(url), 10 * 60 * 1000);
+        vlog(`收文件完成 ${meta.name} ${memoryNote()}`);
+        note.set(`已下载：${meta.name}`);
+        note.close(5000);
+      });
+      return { write: inner.write, end: inner.end, abort: () => failed(inner) };
     }
     return null;
   }
 
   let filesToast = null;
+  // Where the next incoming file goes, when the user picked one (desktop Chrome / Edge).
+  let savedTarget = null;
+
+  // Must run inside the click that asked for the download: showSaveFilePicker needs a user gesture.
+  async function chooseSaveTarget(file) {
+    if (!window.showSaveFilePicker || isTouch) return true;
+    try {
+      const handle = await window.showSaveFilePicker({ suggestedName: String(file.name) });
+      const target = { writable: await handle.createWritable() };
+      savedTarget = target;
+      // Never leave a stranded empty file if the home PC does not answer.
+      setTimeout(() => {
+        if (savedTarget === target) { savedTarget = null; target.writable.abort().catch(() => {}); }
+      }, 60000);
+      return true;
+    } catch (e) {
+      if (e && e.name === 'AbortError') return false;     // the user cancelled the dialog
+      vlog('选择保存位置失败，改用普通下载：' + (e && e.message));
+      return true;
+    }
+  }
 
   function offerFiles(files) {
     if (!Array.isArray(files) || !files.length) return;
@@ -1448,7 +1670,10 @@
     filesToast = toast(`家里电脑复制了 ${label}（${formatSize(total)}）`, {
       sticky: true,
       label: '下载到这台电脑',
-      action: () => ctlSend({ t: 'get-files', indexes: files.map((f, i) => i) }),
+      action: async () => {
+        if (files.length === 1 && !(await chooseSaveTarget(files[0]))) return;
+        ctlSend({ t: 'get-files', indexes: files.map((f, i) => i) });
+      },
     });
     filesToast.close(60000);
   }
@@ -1468,7 +1693,22 @@
 
   // ---------- wiring ----------
 
+  function exportLog() {
+    flushLog();
+    const text = logBuf.join('\n') || '（日志是空的）';
+    const url = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'homedesk-viewer-log.txt';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }
+
   function bindUi() {
+    $('logBtn').onclick = exportLog;
+    $('logClearBtn').onclick = () => { logBuf = []; logDirty = true; flushLog(); toast('日志已清空'); };
     $('hostId').value = store('hostId') || '';
     $('signalUrl').value = store('signalUrl') || '';
     $('signalUrl').placeholder = HD.DEFAULT_SIGNAL_URL;
@@ -1528,6 +1768,26 @@
       if (ev.dataTransfer && ev.dataTransfer.files.length) sendFiles(ev.dataTransfer.files);
     });
   }
+
+  // Page-stall detector: a 1 s timer that fires much later than 1 s means the page was frozen that long.
+  let beat = Date.now();
+  setInterval(() => {
+    const now = Date.now();
+    const late = now - beat - 1000;
+    beat = now;
+    if (late > 3000 && document.visibilityState === 'visible') {
+      vlog(`页面停顿约 ${Math.round(late / 1000)} 秒 ${memoryNote()}`);
+    }
+  }, 1000);
+  setInterval(flushLog, 2000);
+  setInterval(() => { if (inSession) vlog(`状态 ${$('stats').textContent} ${memoryNote()}`); }, 30000);
+  document.addEventListener('visibilitychange', () => { vlog('页面 ' + document.visibilityState); flushLog(); });
+  window.addEventListener('pagehide', () => { vlog('页面关闭或离开'); flushLog(); });
+  window.addEventListener('error', (ev) => { vlog(`脚本错误 ${ev.message} @${ev.lineno}`); });
+  window.addEventListener('unhandledrejection', (ev) => {
+    vlog(`未处理的异常 ${(ev.reason && ev.reason.message) || ev.reason}`);
+  });
+  vlog(`页面打开 触屏=${isTouch} 设备内存=${navigator.deviceMemory || '?'}GB ${navigator.userAgent}`);
 
   bindUi();
   bindInput();
