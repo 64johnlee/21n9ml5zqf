@@ -135,6 +135,7 @@
       </div>
       <div class="row keys">
         <button data-combo="Enter">回车</button>
+        <button id="kbDbl" title="在鼠标当前位置双击（先单指拖动把鼠标移到目标上）">双击</button>
         <button data-combo="Backspace">⌫</button>
         <button data-combo="Delete">Del</button>
         <button data-combo="Escape">Esc</button>
@@ -1251,6 +1252,22 @@
   const SLOP = 10;
   const PINCH_START = 24;
   const MAX_ZOOM = 5;
+  const DOUBLE_TAP_MS = 400;     // two taps closer in time than this form a double-click ...
+  const DOUBLE_TAP_DIST = 40;    // ... if they are also closer than this many phone pixels
+
+  // <double-tap>
+  // Windows only sees a double-click if the 2nd click lands within a few host pixels (4 px by default)
+  // of the 1st, and one phone pixel is ~5 host pixels, so two finger taps almost never hit the same
+  // pixel and became two separate single clicks. A 2nd tap that follows quickly and nearby is therefore
+  // moved onto the exact spot of the 1st one. `last` is the previous tap {x, y, t} or null.
+  function doubleTapStep(last, pt, now) {
+    if (last && now - last.t <= DOUBLE_TAP_MS && Math.hypot(pt.clientX - last.x, pt.clientY - last.y) <= DOUBLE_TAP_DIST) {
+      return { pt: { clientX: last.x, clientY: last.y }, last: null, dbl: true };   // a 3rd tap starts a new pair
+    }
+    return { pt, last: { x: pt.clientX, y: pt.clientY, t: now }, dbl: false };
+  }
+  // </double-tap>
+  let lastTap = null;
   let zoom = 1;
   let panX = 0;
   let panY = 0;
@@ -1269,6 +1286,7 @@
     if (gesture) clearTimeout(gesture.timer);
     if (gesture && gesture.mode === 'drag') sendInput({ t: 'mb', b: 0, d: 0 });
     gesture = null;
+    lastTap = null;
     zoom = 1; panX = 0; panY = 0;
     video.style.transform = '';
   }
@@ -1396,8 +1414,14 @@
     clearTimeout(g.timer);
     if (ev.type === 'touchend') {
       const pt = { clientX: g.x, clientY: g.y };
-      if (g.mode === 'pending') clickAt(pt, 0);
-      else if (g.mode === 'held') clickAt(pt, 2);
+      if (g.mode === 'pending') {
+        const step = doubleTapStep(lastTap, pt, Date.now());
+        lastTap = step.last;
+        clickAt(step.pt, 0);
+      } else {
+        lastTap = null;                       // a drag, long press or pan breaks a double-tap pair
+        if (g.mode === 'held') clickAt(pt, 2);
+      }
     }
     if (g.mode === 'drag') {
       moveTo({ clientX: g.x, clientY: g.y });
@@ -1517,6 +1541,14 @@
     for (const button of $('kb').querySelectorAll('button[data-combo]')) {
       button.onclick = () => sendCombo(button.dataset.combo);
     }
+    // Double-click at wherever the pointer is now (move it first with one finger). Both clicks go out
+    // back to back, so Windows' 500 ms / 4 px double-click limits cannot be missed.
+    $('kbDbl').onclick = () => {
+      for (let i = 0; i < 2; i++) {
+        sendInput({ t: 'mb', b: 0, d: 1 });
+        sendInput({ t: 'mb', b: 0, d: 0 });
+      }
+    };
   }
 
   // ---------- clipboard ----------
