@@ -61,6 +61,7 @@
   #kb .row { display:flex; gap:6px; }
   #kb .keys { overflow-x:auto; }
   #kb textarea { flex:1; min-width:0; resize:none; font-size:16px; }
+  #kb select { flex:1; min-width:0; font-size:16px; padding:6px; }
   #kb button { padding:6px 10px; }
 </style>
 </head>
@@ -126,6 +127,10 @@
       <div class="row">
         <textarea id="kbText" rows="2" placeholder="在这里打字（中文也行），点「发送」就打到家里电脑光标处"></textarea>
         <button id="kbSend" class="primary">发送</button>
+      </div>
+      <div class="row">
+        <select id="kbHist" title="发送历史（只存在这台设备的浏览器里，24 小时后自动删除）"><option value="">历史（还没有）</option></select>
+        <button id="kbHistClear">清空历史</button>
       </div>
       <div class="row keys">
         <button data-combo="Enter">回车</button>
@@ -1402,6 +1407,54 @@
     gesture = null;
   }
 
+  // ---------- typing-panel send history ----------
+  // The panel clears its box right after "send", and the paste can land nowhere (no text field focused
+  // on the home PC, a connection hiccup), which used to lose long texts for good. So every send is first
+  // kept here: last KB_HIST_MAX texts, only in this device's browser (localStorage, never uploaded),
+  // dropped after KB_HIST_TTL_MS because the panel is also used to type passwords.
+  const KB_HIST_MAX = 20;
+  const KB_HIST_TTL_MS = 24 * 3600 * 1000;
+  const KB_HIST_MAX_CHARS = 50000;
+
+  // <kb-history>
+  function kbHistParse(raw, now) {
+    let list = [];
+    try { list = JSON.parse(raw || '[]'); } catch (e) { list = []; }
+    if (!Array.isArray(list)) return [];
+    return list
+      .filter((h) => h && typeof h.text === 'string' && typeof h.t === 'number' && now - h.t < KB_HIST_TTL_MS && h.t <= now + 60000)
+      .slice(0, KB_HIST_MAX);
+  }
+
+  // newest first; an identical text moves to the front instead of being listed twice
+  function kbHistAdd(list, text, now) {
+    if (!text || text.length > KB_HIST_MAX_CHARS) return list;
+    return [{ t: now, text }].concat(list.filter((h) => h.text !== text)).slice(0, KB_HIST_MAX);
+  }
+  // </kb-history>
+
+  let kbHist = [];
+
+  function kbHistSave() { store('kbHist', JSON.stringify(kbHist)); }
+
+  function renderKbHist() {
+    const sel = $('kbHist');
+    sel.textContent = '';
+    const head = document.createElement('option');
+    head.value = '';
+    head.textContent = kbHist.length ? `历史（${kbHist.length} 条，点选取回）` : '历史（还没有）';
+    sel.appendChild(head);
+    kbHist.forEach((h, i) => {
+      const d = new Date(h.t);
+      const hhmm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+      const flat = h.text.replace(/\s+/g, ' ');
+      const o = document.createElement('option');
+      o.value = String(i);
+      o.textContent = `${hhmm} · ${h.text.length}字 · ${flat.slice(0, 24)}${flat.length > 24 ? '…' : ''}`;
+      sel.appendChild(o);
+    });
+  }
+
   async function sendText(text) {
     if (!text || !bulk) return false;
     const bytes = new TextEncoder().encode(text);
@@ -1427,13 +1480,38 @@
       $('kbBtn').classList.toggle('primary', open);
       if (open) $('kbText').focus();
     };
+    kbHist = kbHistParse(store('kbHist'), Date.now());
+    renderKbHist();
     $('kbSend').onclick = () => {
       const text = $('kbText').value;
       if (!text) return;
+      // Keep a copy BEFORE sending: the box is cleared on success even if the paste landed nowhere.
+      kbHist = kbHistAdd(kbHist, text, Date.now());
+      kbHistSave();
+      renderKbHist();
+      vlog(`键盘面板发送 ${text.length} 字`);
       sendText(text).then((ok) => {
-        if (ok) $('kbText').value = '';
-        else toast('文字太长或连接已断开，没有发出去。');
-      }, () => toast('发送失败。'));
+        if (ok) {
+          $('kbText').value = '';
+          toast(`已发送 ${text.length} 个字。没在家里电脑上出现的话，点「历史」就能取回。`, { ms: 7000 });
+        } else toast('文字太长或连接已断开，没有发出去。文字还在输入框里，也存进了「历史」。');
+      }, () => toast('发送失败。文字存进了「历史」，点「历史」可以取回。'));
+    };
+    $('kbHist').onchange = () => {
+      const picked = $('kbHist').value;
+      $('kbHist').value = '';
+      if (picked === '') return;            // the header line, not an entry
+      const h = kbHist[Number(picked)];
+      if (!h) return;
+      const box = $('kbText');
+      box.value = box.value ? box.value + '\n' + h.text : h.text;
+      box.focus();
+    };
+    $('kbHistClear').onclick = () => {
+      kbHist = [];
+      kbHistSave();
+      renderKbHist();
+      toast('发送历史已清空。', { ms: 3000 });
     };
     for (const button of $('kb').querySelectorAll('button[data-combo]')) {
       button.onclick = () => sendCombo(button.dataset.combo);
